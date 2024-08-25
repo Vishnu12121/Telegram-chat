@@ -15,6 +15,7 @@ def install_packages():
         "typing-extensions",
         "exceptiongroup",
         "flask"
+        "gunicorn"
     ]
 
     for package in required_packages:
