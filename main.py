@@ -1,7 +1,8 @@
 import subprocess
-import sysimport
+import sys
 import logging
 import os
+import sqlite3
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -14,39 +15,77 @@ def install_packages():
     ]
 
     for package in required_packages:
-        , "-m", "pip", "install", package])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-# Run thesubprocess.check_call([sys.executable installation of packages
+# Run the installation of packages
 install_packages()
 
 # Set up logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # Define the bot token and owner ID
-TOKEN = int(os.getenv('TOKEN','7449574557:AAGcg6zL-hEVr7byvkVvCAIJPfBYtY-A8BQ'))  # Ensure your TOKEN is set in environment variables or Replit secrets
+TOKEN = os.getenv('TOKEN')  # Ensure your TOKEN is set in environment variables or Replit secrets
 OWNER_ID = int(os.getenv('OWNER_ID', '1696305024'))  # Replace with your actual owner ID
 
-# Store user data
+# Global variables
 waiting_users = []
 active_chats = {}
 last_partner = {}  # Store the last partner for each user
 rematch_requests = {}  # Store rematch requests
 user_ids = set()  # Set to store unique user IDs
 
-# Save user IDs and usernames to files
-async def save_user_data(context: ContextTypes.DEFAULT_TYPE) -> None:
-    with open('user_ids.txt', 'w') as file:
-        for user_id in user_ids:
-            file.write(f"{user_id}\n")
+# Initialize the database
+def init_db():
+    conn = sqlite3.connect('chatbot.db')
+    cursor = conn.cursor()
+    
+    # Create Users table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Users (
+            id INTEGER PRIMARY KEY,
+            username TEXT,
+            last_message TEXT
+        )
+    ''')
+    
+    # Create ActiveChats table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ActiveChats (
+            user1_id INTEGER,
+            user2_id INTEGER,
+            chat_state TEXT,
+            PRIMARY KEY (user1_id, user2_id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
 
-    with open('usernames.txt', 'w') as file:
-        for user_id in user_ids:
-            try:
-                chat = await context.bot.get_chat(user_id)
-                if chat.username:
-                    file.write(f"{user_id}: {chat.username}\n")
-            except Exception as e:
-                logging.error(f"Error retrieving username for {user_id}: {e}")
+# Connect to the database
+def get_db_connection():
+    conn = sqlite3.connect('chatbot.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# Save user data to the database
+async def save_user_data(context: ContextTypes.DEFAULT_TYPE) -> None:
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM Users')  # Clear existing data
+    
+    for user_id in user_ids:
+        try:
+            chat = await context.bot.get_chat(user_id)
+            username = chat.username or "Unknown"
+            cursor.execute('''
+                INSERT OR REPLACE INTO Users (id, username, last_message)
+                VALUES (?, ?, ?)
+            ''', (user_id, username, ''))
+        except Exception as e:
+            logging.error(f"Error retrieving username for {user_id}: {e}")
+    
+    conn.commit()
+    conn.close()
 
 # Log message conversation
 def log_conversation(user1_id: int, user2_id: int, message: str) -> None:
@@ -59,15 +98,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.chat_id
 
     # Add user ID to the set and save
+    global user_ids  # Use global keyword to modify the global variable
     user_ids.add(user_id)
     await save_user_data(context)
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
     if user_id in active_chats:
         await update.message.reply_text('You are already in a chat. Use /skip to find a new partner or /stop to leave the chat.')
+        conn.close()
         return
 
     if user_id in waiting_users:
         await update.message.reply_text('You are already waiting for a chat partner.')
+        conn.close()
         return
 
     if waiting_users:
@@ -75,13 +120,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         partner_id = waiting_users.pop(0)
         active_chats[user_id] = partner_id
         active_chats[partner_id] = user_id
+        cursor.execute('''
+            INSERT OR REPLACE INTO ActiveChats (user1_id, user2_id, chat_state)
+            VALUES (?, ?, ?)
+        ''', (user_id, partner_id, 'active'))
+        conn.commit()
+        conn.close()
+        
         await update.message.reply_text(
             'You have been connected to a new chat! Use the following commands:\n'
             '/stop - Stop your current chat\n'
             '/skip - Skip to a new chat\n'
             '/rematch - Request a rematch with your last partner\n'
             '/share_usernames - Share your profile link\n'
-            '\nFor help, contact @Vi5h4u'
         )
         await context.bot.send_message(
             chat_id=partner_id,
@@ -90,7 +141,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                  '/skip - Skip to a new chat\n'
                  '/rematch - Request a rematch with your last partner\n'
                  '/share_usernames - Share your profile link\n'
-                 '\nFor help, contact @Vi5h4u'
         )
     else:
         # No users waiting, add to waiting list
@@ -101,28 +151,59 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             '/skip - Skip to a new chat\n'
             '/rematch - Request a rematch with your last partner\n'
             '/share_usernames - Share your profile link\n'
-            '\nFor help, contact @Vi5h4u'
         )
+    conn.close()
 
 # Stop command
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.chat_id
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
     if user_id in active_chats:
         # Notify partner and disconnect
         partner_id = active_chats.pop(user_id)
         active_chats.pop(partner_id, None)
-        await context.bot.send_message(chat_id=partner_id, text='Your chat partner has left the chat.')
-        await update.message.reply_text('You have left the chat.')
+        cursor.execute('DELETE FROM ActiveChats WHERE (user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?)',
+                       (user_id, partner_id, partner_id, user_id))
+        conn.commit()
+
+        # Notify partner about user leaving
+        await context.bot.send_message(chat_id=partner_id, text='Your chat partner has left the chat. You can use /rematch to reconnect or /start to find a new partner.')
+        
+        # Offer rematch if partner also wants it
+        if partner_id in rematch_requests and rematch_requests[partner_id]:
+            last_partner[user_id] = partner_id
+            last_partner[partner_id] = user_id
+            rematch_requests.pop(partner_id, None)  # Clear request for partner
+            active_chats[user_id] = partner_id
+            active_chats[partner_id] = user_id
+            cursor.execute('''
+                INSERT OR REPLACE INTO ActiveChats (user1_id, user2_id, chat_state)
+                VALUES (?, ?, ?)
+            ''', (user_id, partner_id, 'active'))
+            conn.commit()
+            await update.message.reply_text('You have been rematched with your last partner!')
+            await context.bot.send_message(chat_id=partner_id, text='You have been rematched with your last partner!')
+        else:
+            await update.message.reply_text('You have left the chat. Use /start to find a new partner.')
+
+        conn.close()
     elif user_id in waiting_users:
         waiting_users.remove(user_id)
+        conn.close()
         await update.message.reply_text('You are no longer waiting for a chat partner.')
     else:
+        conn.close()
         await update.message.reply_text('You are not connected to any chat.')
 
 # Skip command
 async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.message.chat_id
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
     if user_id in active_chats:
         # Notify partner and disconnect
@@ -130,20 +211,40 @@ async def skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         active_chats.pop(partner_id, None)
         last_partner[user_id] = partner_id
         last_partner[partner_id] = user_id
-        await context.bot.send_message(chat_id=partner_id, text='Your chat partner has skipped to a new chat.')
-        await update.message.reply_text('You have skipped to a new chat.')
+        cursor.execute('DELETE FROM ActiveChats WHERE (user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?)',
+                       (user_id, partner_id, partner_id, user_id))
+        conn.commit()
 
-        # Try to connect to a new chat
-        if not waiting_users:
-            # If there are no users waiting, re-add the current user to the waiting list
-            waiting_users.append(user_id)
-            await update.message.reply_text('No new chat partner is available at the moment. Please wait for someone to start a chat.')
+        # Notify partner about user skipping
+        await context.bot.send_message(chat_id=partner_id, text='Your chat partner has skipped to a new chat. You can use /rematch to reconnect or /start to find a new partner.')
+        
+        # Offer rematch if partner also wants it
+        if partner_id in rematch_requests and rematch_requests[partner_id]:
+            rematch_requests.pop(partner_id, None)  # Clear request for partner
+            active_chats[user_id] = partner_id
+            active_chats[partner_id] = user_id
+            cursor.execute('''
+                INSERT OR REPLACE INTO ActiveChats (user1_id, user2_id, chat_state)
+                VALUES (?, ?, ?)
+            ''', (user_id, partner_id, 'active'))
+            conn.commit()
+            await update.message.reply_text('You have been rematched with your last partner!')
+            await context.bot.send_message(chat_id=partner_id, text='You have been rematched with your last partner!')
         else:
-            # Proceed with the matching process
-            await start(update, context)
+            # Try to connect to a new chat
+            if not waiting_users:
+                # If there are no users waiting, re-add the current user to the waiting list
+                waiting_users.append(user_id)
+                await update.message.reply_text('No new chat partner is available at the moment. Please wait for someone to start a chat.')
+            else:
+                # Proceed with the matching process
+                await start(update, context)
+        conn.close()
     elif user_id in waiting_users:
+        conn.close()
         await update.message.reply_text('You are already waiting for a new chat.')
     else:
+        conn.close()
         await update.message.reply_text('You are not in a chat. Use /start to connect.')
 
 # Rematch command
@@ -168,6 +269,16 @@ async def rematch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_partner.pop(partner_id, None)
         active_chats[user_id] = partner_id
         active_chats[partner_id] = user_id
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO ActiveChats (user1_id, user2_id, chat_state)
+            VALUES (?, ?, ?)
+        ''', (user_id, partner_id, 'active'))
+        conn.commit()
+        conn.close()
+
         await update.message.reply_text('You have been rematched with your last partner!')
         await context.bot.send_message(chat_id=partner_id, text='You have been rematched with your last partner!')
     else:
@@ -211,6 +322,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # Function to run the bot
 def main() -> None:
+    # Initialize database
+    init_db()
+
     application = ApplicationBuilder().token(TOKEN).build()
 
     # Add handlers
@@ -227,5 +341,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-    
-
+Make changes here
