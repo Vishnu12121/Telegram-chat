@@ -23,7 +23,7 @@ install_packages()
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # Define the bot token and owner ID
-TOKEN = os.getenv('TOKEN')  # Ensure your TOKEN is set in environment variables or Replit secrets
+TOKEN = int(os.getenv('TOKEN','7449574557:AAGcg6zL-hEVr7byvkVvCAIJPfBYtY-A8BQ'))  # Ensure your TOKEN is set in environment variables or Replit secrets
 OWNER_ID = int(os.getenv('OWNER_ID', '1696305024'))  # Replace with your actual owner ID
 
 # Store user data
